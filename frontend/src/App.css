@@ -479,3 +479,69 @@ body {
   font-weight: 600;
   color: #fff;
 }
+
+/* ============================================
+   Structured Output
+   ============================================ */
+
+.structured-output {
+  margin: 0;
+  padding: 12px 16px;
+  background: #1a1a2e;
+  border: 1px solid #3d3d4d;
+  border-radius: 8px;
+  overflow-x: auto;
+}
+
+.structured-output code {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 0.85rem;
+  color: #e0e0e0;
+  white-space: pre;
+}
+
+/* ============================================
+   Workflow Steps
+   ============================================ */
+
+.workflow-steps {
+  margin-top: 8px;
+  padding: 8px 12px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 8px;
+  font-size: 0.75rem;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  color: #9ca3af;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.step {
+  padding: 4px 8px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.step-pending {
+  background: rgba(107, 114, 128, 0.2);
+  color: #9ca3af;
+}
+
+.step-loading {
+  background: rgba(251, 191, 36, 0.2);
+  color: #fbbf24;
+}
+
+.step-success {
+  background: rgba(16, 185, 129, 0.2);
+  color: #10b981;
+}
+
+.step-error {
+  background: rgba(239, 68, 68, 0.2);
+  color: #ef4444;
+}

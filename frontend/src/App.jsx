@@ -4,13 +4,14 @@
  * This component provides a chat interface that:
  * 1. Sends messages to the backend (/chat endpoint)
  * 2. Receives WebSocket connection details
- * 3. Connects to ModelRiver WebSocket to receive AI responses
+ * 3. Connects to ModelRiver WebSocket to receive AI responses using @modelriver/client
  * 
  * Data Flow:
  * User Message → Backend → ModelRiver → WebSocket → This Component
  */
 
 import { useState, useRef, useEffect } from 'react'
+import { useModelRiver } from '@modelriver/client/react'
 import './App.css'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -18,7 +19,7 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
 
 // Backend API URL
-const BACKEND_URL = 'http://localhost:4001'
+const BACKEND_URL = import.meta.env.VITE_API_URL || 'http://localhost:4000'
 
 function App() {
     // ============================================
@@ -28,13 +29,30 @@ function App() {
     const [messages, setMessages] = useState([])
     const [inputValue, setInputValue] = useState('')
     const [isLoading, setIsLoading] = useState(false)
-    const [connectionStatus, setConnectionStatus] = useState('disconnected')
     const [error, setError] = useState(null)
     const [devMode, setDevMode] = useState(false)
 
     // Refs
     const messagesEndRef = useRef(null)
-    const wsRef = useRef(null)
+
+    // ============================================
+    // ModelRiver Client Hook
+    // ============================================
+
+    const {
+        connect,
+        disconnect,
+        response,
+        error: modelRiverError,
+        isConnected,
+        isConnecting,
+        steps,
+        connectionState
+    } = useModelRiver({
+        baseUrl: 'wss://api.modelriver.com/socket',
+        persist: true,
+        debug: false
+    })
 
     // ============================================
     // Auto-scroll to bottom when new messages arrive
@@ -44,103 +62,37 @@ function App() {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
     }, [messages])
 
-    // Cleanup WebSocket on unmount
+    // Handle ModelRiver response
     useEffect(() => {
-        return () => {
-            if (wsRef.current) {
-                wsRef.current.close()
-            }
-        }
-    }, [])
+        if (response) {
+            // Extract metadata and status
+            const meta = response.meta || {};
+            const status = meta.status || response.status || 'pending';
+            const isStructured = meta.structured_output === true;
+            
+            console.log('📥 WebSocket response received:', { status, hasData: !!response.data });
 
-    // ============================================
-    // WebSocket Connection Handler
-    // ============================================
-
-    const connectWebSocket = (wsToken, websocketUrl, websocketChannel) => {
-        // Phoenix channels often expect /websocket at the end of the URL
-        let url = websocketUrl
-        // Normalize URL: Ensure wss:// for production/443
-        if (url.includes(":443") || url.includes("api.modelriver.com")) {
-            url = url.replace("ws://", "wss://").replace(":443", "")
-        }
-        if (url.endsWith('/socket')) {
-            url = `${url}/websocket`
-        }
-
-        // Construct WebSocket URL with encoded token
-        const wsUrl = `${url}?token=${encodeURIComponent(wsToken)}`
-
-        console.log('🔌 Connecting to WebSocket:', wsUrl)
-        setConnectionStatus('connecting')
-
-        const ws = new WebSocket(wsUrl)
-        wsRef.current = ws
-
-        ws.onopen = () => {
-            console.log('✅ WebSocket connected')
-            setConnectionStatus('connected')
-
-            // Join the channel using Phoenix protocol
-            const joinMsg = JSON.stringify({
-                topic: websocketChannel,
-                event: 'phx_join',
-                payload: {},
-                ref: '1'
-            })
-            ws.send(joinMsg)
-            console.log('📤 Joined channel:', websocketChannel)
-        }
-
-        ws.onmessage = (event) => {
-            const msg = JSON.parse(event.data)
-            console.log('📥 WebSocket message:', msg)
-
-            // Handle different message types
-            if (msg.event === 'ai_response_complete' || msg.event === 'response') {
-                const payload = msg.payload
-
-                // Check if this is actually an error response (status: 'error' in payload or data)
-                const isError = payload?.status === 'error' || payload?.data?.status === 'error'
-
-                if (isError) {
-                    // Extract error message from various possible locations
-                    const errorMessage =
-                        payload?.error?.message ||
-                        payload?.data?.error?.message ||
-                        payload?.message ||
-                        payload?.data?.message ||
-                        'AI request failed'
-
-                    console.log('❌ Error in response:', errorMessage)
-                    setError(errorMessage)
-                    setMessages(prev => [...prev, {
-                        id: Date.now(),
-                        role: 'assistant',
-                        content: `❌ Error: ${errorMessage}`,
-                        timestamp: new Date().toISOString(),
-                        isError: true
-                    }])
-                    setIsLoading(false)
-                    setConnectionStatus('error')
-                    if (ws._timeoutId) clearTimeout(ws._timeoutId)
-                    ws.close()
-                    return
+            // Only process and display messages when status is "success" or "completed"
+            // "completed" is used for event-driven workflows after callback
+            // "success" is used for standard workflows
+            if (status === 'success' || status === 'completed') {
+                // Extract AI response content (handle both structured and unstructured output)
+                let aiContent;
+                if (isStructured || (response.data && typeof response.data === 'object' && !response.data.choices && !Array.isArray(response.data))) {
+                    // Structured output - format as JSON
+                    aiContent = JSON.stringify(response.data, null, 2);
+                } else {
+                    // Unstructured output - extract from choices
+                    aiContent = response.data?.choices?.[0]?.message?.content ||
+                        response.content ||
+                        JSON.stringify(response.data);
                 }
 
-                // Extract AI response from payload (success case)
-                const aiContent =
-                    payload?.response?.choices?.[0]?.message?.content ||
-                    payload?.data?.choices?.[0]?.message?.content ||
-                    payload?.choices?.[0]?.message?.content ||
-                    JSON.stringify(payload)
+                // Extract usage and model info
+                const usage = meta.usage || {};
+                const model = meta.used_model || meta.model || 'unknown';
 
-                // Extract metadata if available
-                const meta = payload?.meta || payload?.data?.meta || {}
-                const usage = payload?.usage || payload?.data?.usage || {}
-                const model = meta.requested_model || meta.model || 'unknown'
-
-                // Add assistant message to chat
+                // Add assistant message to chat only when status is success
                 setMessages(prev => [...prev, {
                     id: Date.now(),
                     role: 'assistant',
@@ -150,88 +102,61 @@ function App() {
                         ...meta,
                         ...usage,
                         model,
-                        channelId: msg.topic
+                        channelId: response.channel_id,
+                        isStructured: isStructured || (typeof response.data === 'object' && !response.data.choices && !Array.isArray(response.data))
                     }
-                }])
+                }]);
 
-                setIsLoading(false)
-                setConnectionStatus('disconnected')
-                if (ws._timeoutId) clearTimeout(ws._timeoutId)
-                ws.close()
-            }
-
-            if (msg.event === 'ai_response_error' || msg.event === 'error') {
-                const errorMessage = msg.payload?.error || msg.payload?.message || 'Unknown error occurred'
-                setError(errorMessage)
-                // Add error message to chat so user can see it inline
+                setIsLoading(false);
+                // Don't call disconnect() here - the client will handle connection cleanup
+                // Calling disconnect() here can cause issues with event-driven workflows
+                // where the client needs to manage the connection lifecycle
+            } else if (status === 'error') {
+                // Handle error status
+                const errorMessage = response.error?.message || response.message || 'An error occurred';
+                setError(errorMessage);
                 setMessages(prev => [...prev, {
                     id: Date.now(),
                     role: 'assistant',
                     content: `❌ Error: ${errorMessage}`,
                     timestamp: new Date().toISOString(),
                     isError: true
-                }])
-                setIsLoading(false)
-                setConnectionStatus('error')
-                if (ws._timeoutId) clearTimeout(ws._timeoutId)
-                ws.close()
-            }
-
-            // Handle step updates (optional - for showing progress)
-            if (msg.event === 'step') {
-                console.log('📊 Step update:', msg.payload)
-            }
-        }
-
-        ws.onerror = (error) => {
-            console.error('❌ WebSocket error:', error)
-            setError('WebSocket connection failed')
-            setConnectionStatus('error')
-            setIsLoading(false)
-        }
-
-        ws.onclose = (event) => {
-            console.log('🔌 WebSocket disconnected', event.code, event.reason)
-            // If we're still loading when the socket closes, it means we didn't get a response
-            if (isLoading) {
-                const errorMessage = event.reason || 'Connection closed before response was received'
-                setError(errorMessage)
-                // Add error message to chat so it's visible inline
-                setMessages(prev => [...prev, {
-                    id: Date.now(),
-                    role: 'assistant',
-                    content: `❌ Error: ${errorMessage}`,
-                    timestamp: new Date().toISOString(),
-                    isError: true
-                }])
-                setIsLoading(false)
-            }
-            if (connectionStatus !== 'error') {
-                setConnectionStatus('disconnected')
+                }]);
+                setIsLoading(false);
+                // Don't call disconnect() here - the client will handle connection cleanup
+            } else if (status === 'pending') {
+                // Keep loading state for pending status - typing indicator will show
+                console.log('⏳ Response status is pending - showing typing indicator');
+                // Don't set isLoading to false, keep it true to show typing indicator
+            } else {
+                // Unknown status - log and keep loading
+                console.log('⚠️ Unknown response status:', status);
             }
         }
+    }, [response, disconnect]);
 
-        // Timeout: If no response after 2 minutes, show error
-        const timeoutId = setTimeout(() => {
-            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                console.log('⏰ WebSocket timeout - no response received')
-                setError('Request timed out - no response received')
-                setMessages(prev => [...prev, {
-                    id: Date.now(),
-                    role: 'assistant',
-                    content: '❌ Error: Request timed out - no response received',
-                    timestamp: new Date().toISOString(),
-                    isError: true
-                }])
-                setIsLoading(false)
-                setConnectionStatus('error')
-                ws.close()
-            }
-        }, 120000) // 2 minute timeout
+    // Handle ModelRiver errors
+    useEffect(() => {
+        if (modelRiverError) {
+            setError(modelRiverError);
+            setMessages(prev => [...prev, {
+                id: Date.now(),
+                role: 'assistant',
+                content: `❌ Error: ${modelRiverError}`,
+                timestamp: new Date().toISOString(),
+                isError: true
+            }]);
+            setIsLoading(false);
+        }
+    }, [modelRiverError]);
 
-        // Store timeout ref for cleanup
-        ws._timeoutId = timeoutId
-    }
+    // Cleanup on unmount
+    useEffect(() => {
+        return () => {
+            disconnect();
+        }
+    }, [disconnect])
+
 
     // ============================================
     // Send Message Handler
@@ -275,14 +200,20 @@ function App() {
             const data = await response.json()
             console.log('✅ Backend response:', data)
 
-            // Step 2: Connect to WebSocket to receive AI response
-            const { ws_token, websocket_url, websocket_channel } = data
+            // Step 2: Connect to ModelRiver WebSocket using the client SDK
+            const { channel_id, ws_token, websocket_url, websocket_channel } = data
 
-            if (!ws_token || !websocket_url || !websocket_channel) {
+            if (!channel_id || !ws_token || !websocket_url || !websocket_channel) {
                 throw new Error('Missing WebSocket connection details from backend')
             }
 
-            connectWebSocket(ws_token, websocket_url, websocket_channel)
+            // Connect using ModelRiver client
+            connect({
+                channelId: channel_id,
+                wsToken: ws_token,
+                websocketUrl: websocket_url,
+                websocketChannel: websocket_channel
+            })
 
         } catch (err) {
             console.error('❌ Error sending message:', err)
@@ -312,12 +243,12 @@ function App() {
             <header className="chat-header">
                 <div className="header-left">
                     <h1>💬 Chatbot Async App</h1>
-                    <div className={`connection-status ${connectionStatus}`}>
+                    <div className={`connection-status ${connectionState}`}>
                         <span className="status-dot"></span>
                         <span className="status-text">
-                            {connectionStatus === 'connecting' ? 'Connecting...' :
-                                connectionStatus === 'connected' ? 'Connected' :
-                                    connectionStatus === 'error' ? 'Error' : 'Disconnected'}
+                            {isConnecting ? 'Connecting...' :
+                                isConnected ? 'Connected' :
+                                    connectionState === 'error' ? 'Error' : 'Disconnected'}
                         </span>
                     </div>
                 </div>
@@ -353,30 +284,38 @@ function App() {
                             <div className="message-content">
                                 <div className="message-text">
                                     {message.role === 'assistant' && !message.isError ? (
-                                        <ReactMarkdown
-                                            remarkPlugins={[remarkGfm]}
-                                            components={{
-                                                code({ node, inline, className, children, ...props }) {
-                                                    const match = /language-(\w+)/.exec(className || '')
-                                                    return !inline && match ? (
-                                                        <SyntaxHighlighter
-                                                            style={vscDarkPlus}
-                                                            language={match[1]}
-                                                            PreTag="div"
-                                                            {...props}
-                                                        >
-                                                            {String(children).replace(/\n$/, '')}
-                                                        </SyntaxHighlighter>
-                                                    ) : (
-                                                        <code className={className} {...props}>
-                                                            {children}
-                                                        </code>
-                                                    )
-                                                }
-                                            }}
-                                        >
-                                            {message.content}
-                                        </ReactMarkdown>
+                                        message.meta?.isStructured ? (
+                                            // Structured output - show as formatted JSON
+                                            <pre className="structured-output">
+                                                <code>{message.content}</code>
+                                            </pre>
+                                        ) : (
+                                            // Unstructured output - render as markdown
+                                            <ReactMarkdown
+                                                remarkPlugins={[remarkGfm]}
+                                                components={{
+                                                    code({ node, inline, className, children, ...props }) {
+                                                        const match = /language-(\w+)/.exec(className || '')
+                                                        return !inline && match ? (
+                                                            <SyntaxHighlighter
+                                                                style={vscDarkPlus}
+                                                                language={match[1]}
+                                                                PreTag="div"
+                                                                {...props}
+                                                            >
+                                                                {String(children).replace(/\n$/, '')}
+                                                            </SyntaxHighlighter>
+                                                        ) : (
+                                                            <code className={className} {...props}>
+                                                                {children}
+                                                            </code>
+                                                        )
+                                                    }
+                                                }}
+                                            >
+                                                {message.content}
+                                            </ReactMarkdown>
+                                        )
                                     ) : (
                                         message.content
                                     )}
@@ -388,6 +327,18 @@ function App() {
                                         {message.meta.duration_ms && (
                                             <div className="meta-item">⏱️ {message.meta.duration_ms}ms</div>
                                         )}
+                                        {message.meta.isStructured && (
+                                            <div className="meta-item">📋 Structured Output</div>
+                                        )}
+                                    </div>
+                                )}
+                                {devMode && steps.length > 0 && (
+                                    <div className="workflow-steps">
+                                        {steps.map((step) => (
+                                            <div key={step.id} className={`step step-${step.status}`}>
+                                                {step.name} - {step.status}
+                                            </div>
+                                        ))}
                                     </div>
                                 )}
                                 <div className="message-time">
@@ -398,8 +349,8 @@ function App() {
                     ))
                 )}
 
-                {/* Loading indicator */}
-                {isLoading && (
+                {/* Loading indicator - show when loading or when response status is pending */}
+                {(isLoading || (response && (response.meta?.status === 'pending' || response.status === 'pending'))) && (
                     <div className="message assistant loading">
                         <div className="message-avatar">🤖</div>
                         <div className="message-content">
@@ -407,6 +358,9 @@ function App() {
                                 <span></span>
                                 <span></span>
                                 <span></span>
+                            </div>
+                            <div className="message-time">
+                                {new Date().toLocaleTimeString()}
                             </div>
                         </div>
                     </div>
