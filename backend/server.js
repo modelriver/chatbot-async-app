@@ -219,7 +219,13 @@ app.post('/webhook/modelriver', async (req, res) => {
 async function processModelRiverWebhook(req, res) {
     try {
         // Handle both standard and event-driven webhook formats
+        // Note: In some cases, event and ai_response are inside data object
         const { channel_id, status, data, meta, callback_url, type, event, ai_response } = req.body;
+        
+        // Extract event and ai_response from nested data if not at top level
+        const actualEvent = event || data?.event;
+        const actualType = type || data?.type;
+        const actualAiResponse = ai_response || data?.ai_response;
         
         // For event-driven workflows, callback_url can be:
         // 1. Top level: callback_url
@@ -229,16 +235,25 @@ async function processModelRiverWebhook(req, res) {
                            data?.callback_url || 
                            req.headers['x-modelriver-callback-url'];
         
-        // For event-driven workflows, extract data from ai_response
-        const responseData = ai_response?.data || data;
+        // For event-driven workflows (like new_chat), extract data from ai_response.data
+        // This is where the structured response lives
+        const responseData = actualAiResponse?.data || data;
 
         console.log('\n📥 Webhook received from ModelRiver');
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         console.log('📊 Channel ID:', channel_id);
-        console.log('📊 Type:', type || 'standard');
-        console.log('📊 Event:', event || 'N/A');
+        console.log('📊 Type:', actualType || 'standard');
+        console.log('📊 Event:', actualEvent || 'N/A');
         console.log('📊 Status:', status);
         console.log('📊 Callback URL:', callbackUrl || 'Not provided');
+        console.log('📊 Has ai_response:', !!actualAiResponse);
+        console.log('📊 Has ai_response.data:', !!actualAiResponse?.data);
+        
+        // Log if this is a new_chat event
+        if (actualEvent === 'new_chat') {
+            console.log('🎯 Detected new_chat event!');
+            console.log('📦 ai_response.data:', JSON.stringify(actualAiResponse?.data, null, 2));
+        }
 
         // Retrieve pending request info
         const pendingRequest = pendingRequests.get(channel_id) || {};
@@ -348,15 +363,19 @@ async function processModelRiverWebhook(req, res) {
                 let callbackPromise;
                 
                 try {
-                // For event-driven workflows, use ai_response.data directly
+                // For new_chat event, use ai_response.data directly
+                // For other event-driven workflows, also use ai_response.data
                 // For standard webhooks, use data
-                // The callback expects the actual AI response data, not the extracted content
                 let callbackData;
                 
-                if (type === 'task.ai_generated' && ai_response?.data) {
-                    // Event-driven: use ai_response.data as the base
-                    callbackData = ai_response.data;
-                    console.log('📦 Using ai_response.data for callback');
+                if (actualEvent === 'new_chat' && actualAiResponse?.data) {
+                    // new_chat event: use ai_response.data directly
+                    callbackData = actualAiResponse.data;
+                    console.log('📦 Using ai_response.data for new_chat event');
+                } else if (actualType === 'task.ai_generated' && actualAiResponse?.data) {
+                    // Other event-driven: use ai_response.data as the base
+                    callbackData = actualAiResponse.data;
+                    console.log('📦 Using ai_response.data for event-driven callback');
                 } else if (data) {
                     // Standard webhook: use data directly
                     callbackData = data;
@@ -367,67 +386,22 @@ async function processModelRiverWebhook(req, res) {
                     console.log('📦 Using responseData as fallback');
                 }
 
-                // Inject custom IDs into the callback data
-                // ModelRiver expects params["data"] to be a valid object (not null)
-                // If callbackData is an object, merge IDs into it
-                // Otherwise, wrap it in an object with IDs
-                let enrichedData;
-                
-                if (callbackData && typeof callbackData === 'object' && !Array.isArray(callbackData) && callbackData !== null) {
-                    // Object data - merge IDs into it
-                    enrichedData = {
-                        ...callbackData,
-                        id: messageId,
-                        conversation_id: conversationId
-                    };
-                } else if (Array.isArray(callbackData)) {
-                    // Array data - wrap in object
-                    enrichedData = {
-                        items: callbackData,
-                    id: messageId,
-                        conversation_id: conversationId
-                    };
-                } else if (callbackData !== null && callbackData !== undefined) {
-                    // Primitive or string - wrap in object
-                    enrichedData = {
-                        content: callbackData,
-                        id: messageId,
-                        conversation_id: conversationId
-                    };
-                } else {
-                    // Fallback: ensure we always have a valid object
-                    enrichedData = {
-                        id: messageId,
-                        conversation_id: conversationId,
-                        message: 'Response processed'
-                    };
-                }
-
-                // Ensure data is always a valid object (not null)
+                // Simply add id to the AI response data
+                // ModelRiver expects data to be inside a "data" field
                 const callbackPayload = {
-                    data: enrichedData || {},
-                    task_id: messageId,
-                    metadata: {
-                        conversation_id: conversationId,
-                        channel_id: channel_id,
-                        processed_at: new Date().toISOString(),
-                        usage: meta?.usage || data?.usage || ai_response?.meta?.usage || {}
-                    }
+                    data: {
+                        ...callbackData,
+                        id: messageId
+                    },
+                    task_id: messageId
                 };
 
-                // Validate payload before sending
-                if (!callbackPayload.data || typeof callbackPayload.data !== 'object' || Array.isArray(callbackPayload.data)) {
-                    console.error('❌ Invalid callback payload data structure:', callbackPayload.data);
-                    throw new Error('Callback data must be a valid object');
-                }
-
                 console.log('📦 Callback payload structure:', {
-                    hasData: !!callbackPayload.data,
-                    dataType: typeof callbackPayload.data,
-                    isArray: Array.isArray(callbackPayload.data),
                     dataKeys: Object.keys(callbackPayload.data),
-                    taskId: callbackPayload.task_id,
-                    hasMetadata: !!callbackPayload.metadata
+                    hasReply: !!callbackPayload.data.reply,
+                    hasSummary: !!callbackPayload.data.summary,
+                    hasSentiment: !!callbackPayload.data.sentiment,
+                    id: callbackPayload.data.id
                 });
                 console.log('📦 Callback payload (first 500 chars):', JSON.stringify(callbackPayload).substring(0, 500));
                 console.log('🔄 About to send callback POST request...');

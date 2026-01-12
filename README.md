@@ -284,13 +284,17 @@ Here's an example schema for a chatbot that extracts structured information:
 {
   "type": "object",
   "properties": {
+    "reply": {
+      "type": "string",
+      "description": "The AI's direct response or answer to the user's question"
+    },
     "summary": {
       "type": "string",
       "description": "A brief summary of the conversation or response"
     },
     "sentiment": {
       "type": "string",
-      "enum": ["positive", "negative", "neutral"],
+      "enum": ["positive", "negative", "neutral", "mixed"],
       "description": "The sentiment of the user's message"
     },
     "topics": {
@@ -326,7 +330,7 @@ Here's an example schema for a chatbot that extracts structured information:
       "description": "Confidence score of the analysis"
     }
   },
-  "required": ["summary", "sentiment"]
+  "required": ["reply", "summary", "sentiment"]
 }
 ```
 
@@ -355,6 +359,7 @@ curl -X POST http://localhost:4000/chat \
 **Response format:**
 ```json
 {
+  "reply": "I'd be happy to help you with your project! To provide the best assistance, could you please share more details about what specific aspect you need help with?",
   "summary": "User needs urgent help with their project",
   "sentiment": "neutral",
   "topics": ["project", "help", "urgent"],
@@ -368,7 +373,13 @@ curl -X POST http://localhost:4000/chat \
 }
 ```
 
-The frontend will automatically detect structured output and display it as formatted JSON.
+The frontend will automatically detect structured output and display it in a user-friendly format with:
+- **Reply**: The AI's main response to the user's question (displayed prominently)
+- **Sentiment**: Visual indicator with emoji (😊 positive, 😐 neutral, 😟 negative, 🤔 mixed)
+- **Confidence**: Color-coded progress bar
+- **Summary**: Detailed summary of the analysis
+- **Topics**: Interactive tag pills
+- **Action Items**: Prioritized list with color-coded indicators
 
 ## Environment Variables
 
@@ -404,10 +415,12 @@ Create `frontend/.env` file with the following variables (all optional):
 │   └── package.json
 ├── /frontend
 │   ├── /src
-│   │   ├── App.jsx      # Main chat component (uses @modelriver/client)
-│   │   ├── App.css      # Chat UI styles
-│   │   ├── index.css    # Global styles
-│   │   └── main.jsx     # React entry point
+│   │   ├── App.jsx                # Main chat component (uses @modelriver/client)
+│   │   ├── App.css                # Chat UI styles
+│   │   ├── StructuredResponse.jsx # Component for displaying structured AI responses
+│   │   ├── StructuredResponse.css # Styles for structured response display
+│   │   ├── index.css              # Global styles
+│   │   └── main.jsx               # React entry point
 │   ├── index.html
 │   ├── vite.config.js
 │   └── package.json     # Includes @modelriver/client dependency

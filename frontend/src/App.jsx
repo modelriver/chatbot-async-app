@@ -17,6 +17,8 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
+import StructuredResponse from './StructuredResponse'
+
 
 // Backend API URL
 const BACKEND_URL = import.meta.env.VITE_API_URL || 'http://localhost:4000'
@@ -35,6 +37,7 @@ function App() {
     // Refs
     const messagesEndRef = useRef(null)
     const isConnectingRef = useRef(false) // Guard to prevent multiple simultaneous connection attempts
+    const processedChannelsRef = useRef(new Set()) // Track processed channel IDs to prevent duplicate messages
 
     // ============================================
     // ModelRiver Client Hook
@@ -71,54 +74,145 @@ function App() {
             const meta = response.meta || {};
             const status = meta.status || response.status || 'pending';
             const isStructured = meta.structured_output === true;
-            
-            console.log('📥 WebSocket response received:', { status, hasData: !!response.data });
 
-            // Only process and display messages when status is "success" or "completed"
-            // "completed" is used for event-driven workflows after callback
-            // "success" is used for standard workflows
-            if (status === 'success' || status === 'completed') {
-            // Extract AI response content (handle both structured and unstructured output)
-            let aiContent;
-            if (isStructured || (response.data && typeof response.data === 'object' && !response.data.choices && !Array.isArray(response.data))) {
-                // Structured output - format as JSON
-                aiContent = JSON.stringify(response.data, null, 2);
-            } else {
-                // Unstructured output - extract from choices
-                aiContent = response.data?.choices?.[0]?.message?.content ||
-                    response.content ||
-                    JSON.stringify(response.data);
+            console.log('📥 WebSocket response received:', { status, hasData: !!response.data, isStructured, time: new Date().toISOString() });
+            console.log('📦 Full response object:', response);
+            console.log('📦 Full response.data:', response.data);
+            console.log('📦 Full response.ai_response:', response.ai_response);
+            console.log('📦 Full response.meta:', response.meta);
+            console.log('📦 Response keys:', Object.keys(response));
+
+            // Check if data might be in meta.data or meta.ai_response
+            if (response.meta?.data) {
+                console.log('📦 Found data in meta.data:', response.meta.data);
+            }
+            if (response.meta?.ai_response) {
+                console.log('📦 Found ai_response in meta:', response.meta.ai_response);
             }
 
-            // Extract usage and model info
-            const usage = meta.usage || {};
-            const model = meta.used_model || meta.model || 'unknown';
+
+            // Only process and display messages when:
+            // 1. status is "success" or "completed" OR
+            // 2. we have valid ai_response.data with structured fields (before callback completes)
+            const hasAiResponseData = response.ai_response?.data &&
+                (response.ai_response.data.reply || response.ai_response.data.summary || response.ai_response.data.sentiment);
+
+            if (status === 'success' || status === 'completed' || hasAiResponseData) {
+                // Extract AI response content from various possible locations
+                // After callback, ModelRiver sends the data in different places:
+                // 1. response.reply, response.summary etc. (direct from callback payload)
+                // 2. response.ai_response.data (before callback)
+                // 3. response.data (standard webhook)
+
+                // Check if response itself has the structured fields directly
+                const hasDirectFields = response.reply || response.summary || response.sentiment;
+
+                let responseData;
+                // Priority 1: Check ai_response.data first (this is where data comes before callback)
+                if (response.ai_response?.data &&
+                    (response.ai_response.data.reply || response.ai_response.data.summary || response.ai_response.data.sentiment)) {
+                    responseData = response.ai_response.data;
+                    console.log('📍 Using response.ai_response.data');
+                }
+                // Priority 2: Check meta.ai_response.data (might be in meta)
+                else if (response.meta?.ai_response?.data &&
+                    (response.meta.ai_response.data.reply || response.meta.ai_response.data.summary || response.meta.ai_response.data.sentiment)) {
+                    responseData = response.meta.ai_response.data;
+                    console.log('📍 Using response.meta.ai_response.data');
+                }
+                // Priority 3: Check meta.data 
+                else if (response.meta?.data &&
+                    (response.meta.data.reply || response.meta.data.summary || response.meta.data.sentiment)) {
+                    responseData = response.meta.data;
+                    console.log('📍 Using response.meta.data');
+                }
+                // Priority 4: Check if structured fields are directly on response (after callback)
+                else if (hasDirectFields) {
+                    responseData = response;
+                    console.log('📍 Using response directly (callback payload)');
+                }
+                // Priority 5: Check response.data
+                else if (response.data?.reply || response.data?.summary || response.data?.sentiment) {
+                    responseData = response.data;
+                    console.log('📍 Using response.data');
+                }
+                // Priority 6: Check message if it's an object with data
+                else if (response.message && typeof response.message === 'object' &&
+                    (response.message.reply || response.message.summary || response.message.sentiment)) {
+                    responseData = response.message;
+                    console.log('📍 Using response.message');
+                }
+                // Fallback
+                else {
+                    responseData = response.data;
+                    console.log('📍 Using response.data as fallback');
+                }
+
+                console.log('📦 Extracted responseData:', responseData);
+
+                // Skip if responseData is empty or invalid
+                const hasValidData = responseData && Object.keys(responseData).length > 0 &&
+                    (responseData.reply || responseData.summary || responseData.sentiment || responseData.choices);
+
+                if (!hasValidData) {
+                    console.log('⚠️ Skipping empty responseData');
+                    return;
+                }
+
+                // Deduplicate: Skip if we already processed this channel_id
+                const channelId = response.channel_id;
+                if (channelId && processedChannelsRef.current.has(channelId)) {
+                    console.log('⚠️ Skipping duplicate response for channel:', channelId);
+                    return;
+                }
+
+                // Mark this channel as processed
+                if (channelId) {
+                    processedChannelsRef.current.add(channelId);
+                    console.log('✅ Marking channel as processed:', channelId);
+                }
+
+                let aiContent;
+                if (isStructured || (responseData && typeof responseData === 'object' && !responseData.choices && !Array.isArray(responseData))) {
+                    // Structured output - format as JSON
+                    aiContent = JSON.stringify(responseData, null, 2);
+                } else {
+                    // Unstructured output - extract from reply or choices
+                    aiContent = responseData?.reply ||
+                        responseData?.choices?.[0]?.message?.content ||
+                        response.content ||
+                        JSON.stringify(responseData);
+                }
+
+                // Extract usage and model info
+                const usage = meta.usage || {};
+                const model = meta.used_model || meta.model || 'unknown';
 
                 // Add assistant message to chat only when status is success
-            setMessages(prev => [...prev, {
-                id: Date.now(),
-                role: 'assistant',
-                content: aiContent,
-                timestamp: new Date().toISOString(),
-                meta: {
-                    ...meta,
-                    ...usage,
-                    model,
-                    channelId: response.channel_id,
-                    isStructured: isStructured || (typeof response.data === 'object' && !response.data.choices && !Array.isArray(response.data))
-                }
-            }]);
+                setMessages(prev => [...prev, {
+                    id: Date.now(),
+                    role: 'assistant',
+                    content: aiContent,
+                    timestamp: new Date().toISOString(),
+                    meta: {
+                        ...meta,
+                        ...usage,
+                        model,
+                        channelId: response.channel_id,
+                        isStructured: isStructured || (typeof responseData === 'object' && !responseData.choices && !Array.isArray(responseData))
+                    }
+                }]);
 
-            setIsLoading(false);
-            
-            // If status is "completed" or "success", explicitly disconnect to prevent reconnection attempts
-            // Both statuses indicate workflow completion
-            if (status === 'completed' || status === 'success') {
-                console.log(`✅ Workflow completed (status: ${status}) - explicitly disconnecting to prevent reconnection`);
-                disconnect();
-                // Clear the connection guard
-                isConnectingRef.current = false;
-            }
+                setIsLoading(false);
+
+                // If status is "completed" or "success", explicitly disconnect to prevent reconnection attempts
+                // Both statuses indicate workflow completion
+                if (status === 'completed' || status === 'success') {
+                    console.log(`✅ Workflow completed (status: ${status}) - explicitly disconnecting to prevent reconnection`);
+                    disconnect();
+                    // Clear the connection guard
+                    isConnectingRef.current = false;
+                }
             } else if (status === 'error') {
                 // Handle error status
                 const errorMessage = response.error?.message || response.message || 'An error occurred';
@@ -245,10 +339,10 @@ function App() {
                 // Small delay to ensure disconnect completes
                 await new Promise(resolve => setTimeout(resolve, 100));
             }
-            
+
             // Set connection guard
             isConnectingRef.current = true;
-            
+
             // Connect using ModelRiver client
             console.log('🔌 Connecting to new channel:', channel_id);
             connect({
@@ -257,7 +351,7 @@ function App() {
                 websocketUrl: websocket_url,
                 websocketChannel: websocket_channel
             });
-            
+
             // Reset connection guard after a short delay (connection should be initiated)
             setTimeout(() => {
                 isConnectingRef.current = false;
@@ -333,10 +427,8 @@ function App() {
                                 <div className="message-text">
                                     {message.role === 'assistant' && !message.isError ? (
                                         message.meta?.isStructured ? (
-                                            // Structured output - show as formatted JSON
-                                            <pre className="structured-output">
-                                                <code>{message.content}</code>
-                                            </pre>
+                                            // Structured output - show with StructuredResponse component
+                                            <StructuredResponse data={message.content} />
                                         ) : (
                                             // Unstructured output - render as markdown
                                             <ReactMarkdown
@@ -434,6 +526,8 @@ function App() {
                     placeholder="Type your message..."
                     disabled={isLoading}
                     rows={Math.min(5, Math.max(1, inputValue.split('\n').length))}
+                    autoComplete="off"
+                    spellCheck="true"
                 />
                 <button
                     onClick={sendMessage}
