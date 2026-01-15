@@ -282,55 +282,17 @@ Here's an example schema for a chatbot that extracts structured information:
 
 ```json
 {
-  "type": "object",
-  "properties": {
-    "reply": {
-      "type": "string",
-      "description": "The AI's direct response or answer to the user's question"
-    },
-    "summary": {
-      "type": "string",
-      "description": "A brief summary of the conversation or response"
-    },
-    "sentiment": {
-      "type": "string",
-      "enum": ["positive", "negative", "neutral", "mixed"],
-      "description": "The sentiment of the user's message"
-    },
-    "topics": {
-      "type": "array",
-      "items": {
-        "type": "string"
-      },
-      "description": "List of topics discussed in the conversation"
-    },
-    "action_items": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "task": {
-            "type": "string",
-            "description": "The action item description"
-          },
-          "priority": {
-            "type": "string",
-            "enum": ["high", "medium", "low"],
-            "description": "Priority level of the action item"
-          }
-        },
-        "required": ["task", "priority"]
-      },
-      "description": "List of action items extracted from the conversation"
-    },
-    "confidence": {
-      "type": "number",
-      "minimum": 0,
-      "maximum": 1,
-      "description": "Confidence score of the analysis"
+  "reply": "The AI's direct response or answer to the user's question",
+  "summary": "A brief summary of the conversation or response",
+  "sentiment": "The sentiment of the user's message (e.g., positive, negative, neutral, mixed)",
+  "topics": ["List of topics discussed in the conversation"],
+  "action_items": [
+    {
+      "task": "The action item description",
+      "priority": "Priority level (high, medium, low)"
     }
-  },
-  "required": ["reply", "summary", "sentiment"]
+  ],
+  "confidence": "Confidence score between 0 and 1"
 }
 ```
 
