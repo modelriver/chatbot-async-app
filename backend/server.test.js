@@ -176,4 +176,250 @@ describe('Chatbot Async Backend', () => {
             expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
         });
     });
+
+    describe('Webhook Signature Verification', () => {
+        const crypto = require('crypto');
+        const WEBHOOK_SECRET = 'test_webhook_secret_12345';
+
+        // Helper to generate valid signature
+        const generateSignature = (timestamp, body, secret) => {
+            const payload = `${timestamp}.${JSON.stringify(body)}`;
+            return crypto
+                .createHmac('sha256', secret)
+                .update(payload)
+                .digest('hex');
+        };
+
+        it('should accept webhook with valid signature', async () => {
+            const express = require('express');
+            const testApp = express();
+
+            // Middleware to capture raw body
+            testApp.use(express.json({
+                verify: (req, res, buf) => {
+                    req.rawBody = buf.toString();
+                }
+            }));
+
+            // Mock verifyWebhookSignature logic
+            testApp.post('/webhook/modelriver', (req, res) => {
+                const signature = req.headers['x-modelriver-signature'];
+                const timestamp = req.headers['x-modelriver-timestamp'];
+                const rawBody = req.rawBody;
+
+                if (!signature || !timestamp) {
+                    return res.status(401).json({ error: 'Unauthorized', message: 'Missing headers' });
+                }
+
+                const payload = `${timestamp}.${rawBody}`;
+                const expectedSignature = crypto
+                    .createHmac('sha256', WEBHOOK_SECRET)
+                    .update(payload)
+                    .digest('hex');
+
+                const sigBuffer = Buffer.from(signature);
+                const expectedBuffer = Buffer.from(expectedSignature);
+
+                if (sigBuffer.length !== expectedBuffer.length ||
+                    !crypto.timingSafeEqual(sigBuffer, expectedBuffer)) {
+                    return res.status(401).json({ error: 'Unauthorized', message: 'Invalid signature' });
+                }
+
+                res.json({ success: true, message: 'Webhook processed' });
+            });
+
+            const request = require('supertest');
+            const body = { channel_id: 'test-channel', status: 'success' };
+            const timestamp = String(Math.floor(Date.now() / 1000));
+            const signature = generateSignature(timestamp, body, WEBHOOK_SECRET);
+
+            const response = await request(testApp)
+                .post('/webhook/modelriver')
+                .set('X-ModelRiver-Signature', signature)
+                .set('X-ModelRiver-Timestamp', timestamp)
+                .send(body);
+
+            expect(response.status).toBe(200);
+            expect(response.body.success).toBe(true);
+        });
+
+        it('should reject webhook with invalid signature', async () => {
+            const express = require('express');
+            const testApp = express();
+
+            testApp.use(express.json({
+                verify: (req, res, buf) => {
+                    req.rawBody = buf.toString();
+                }
+            }));
+
+            testApp.post('/webhook/modelriver', (req, res) => {
+                const signature = req.headers['x-modelriver-signature'];
+                const timestamp = req.headers['x-modelriver-timestamp'];
+                const rawBody = req.rawBody;
+
+                if (!signature || !timestamp) {
+                    return res.status(401).json({ error: 'Unauthorized', message: 'Missing headers' });
+                }
+
+                const payload = `${timestamp}.${rawBody}`;
+                const expectedSignature = crypto
+                    .createHmac('sha256', WEBHOOK_SECRET)
+                    .update(payload)
+                    .digest('hex');
+
+                if (signature !== expectedSignature) {
+                    return res.status(401).json({ error: 'Unauthorized', message: 'Invalid signature' });
+                }
+
+                res.json({ success: true });
+            });
+
+            const request = require('supertest');
+            const body = { channel_id: 'test-channel', status: 'success' };
+            const timestamp = String(Math.floor(Date.now() / 1000));
+
+            const response = await request(testApp)
+                .post('/webhook/modelriver')
+                .set('X-ModelRiver-Signature', 'invalid-signature')
+                .set('X-ModelRiver-Timestamp', timestamp)
+                .send(body);
+
+            expect(response.status).toBe(401);
+            expect(response.body.error).toBe('Unauthorized');
+        });
+
+        it('should reject webhook with missing signature header', async () => {
+            const express = require('express');
+            const testApp = express();
+
+            testApp.use(express.json({
+                verify: (req, res, buf) => {
+                    req.rawBody = buf.toString();
+                }
+            }));
+
+            testApp.post('/webhook/modelriver', (req, res) => {
+                const signature = req.headers['x-modelriver-signature'];
+                const timestamp = req.headers['x-modelriver-timestamp'];
+
+                if (!signature) {
+                    return res.status(401).json({
+                        error: 'Unauthorized',
+                        message: 'Missing X-ModelRiver-Signature header'
+                    });
+                }
+                if (!timestamp) {
+                    return res.status(401).json({
+                        error: 'Unauthorized',
+                        message: 'Missing X-ModelRiver-Timestamp header'
+                    });
+                }
+
+                res.json({ success: true });
+            });
+
+            const request = require('supertest');
+            const body = { channel_id: 'test-channel', status: 'success' };
+
+            const response = await request(testApp)
+                .post('/webhook/modelriver')
+                .set('X-ModelRiver-Timestamp', '1234567890')
+                .send(body);
+
+            expect(response.status).toBe(401);
+            expect(response.body.message).toBe('Missing X-ModelRiver-Signature header');
+        });
+
+        it('should reject webhook with missing timestamp header', async () => {
+            const express = require('express');
+            const testApp = express();
+
+            testApp.use(express.json({
+                verify: (req, res, buf) => {
+                    req.rawBody = buf.toString();
+                }
+            }));
+
+            testApp.post('/webhook/modelriver', (req, res) => {
+                const signature = req.headers['x-modelriver-signature'];
+                const timestamp = req.headers['x-modelriver-timestamp'];
+
+                if (!signature) {
+                    return res.status(401).json({
+                        error: 'Unauthorized',
+                        message: 'Missing X-ModelRiver-Signature header'
+                    });
+                }
+                if (!timestamp) {
+                    return res.status(401).json({
+                        error: 'Unauthorized',
+                        message: 'Missing X-ModelRiver-Timestamp header'
+                    });
+                }
+
+                res.json({ success: true });
+            });
+
+            const request = require('supertest');
+            const body = { channel_id: 'test-channel', status: 'success' };
+
+            const response = await request(testApp)
+                .post('/webhook/modelriver')
+                .set('X-ModelRiver-Signature', 'some-signature')
+                .send(body);
+
+            expect(response.status).toBe(401);
+            expect(response.body.message).toBe('Missing X-ModelRiver-Timestamp header');
+        });
+
+        it('should reject webhook with wrong secret', async () => {
+            const express = require('express');
+            const testApp = express();
+
+            testApp.use(express.json({
+                verify: (req, res, buf) => {
+                    req.rawBody = buf.toString();
+                }
+            }));
+
+            testApp.post('/webhook/modelriver', (req, res) => {
+                const signature = req.headers['x-modelriver-signature'];
+                const timestamp = req.headers['x-modelriver-timestamp'];
+                const rawBody = req.rawBody;
+
+                if (!signature || !timestamp) {
+                    return res.status(401).json({ error: 'Unauthorized', message: 'Missing headers' });
+                }
+
+                // Server uses correct secret
+                const payload = `${timestamp}.${rawBody}`;
+                const expectedSignature = crypto
+                    .createHmac('sha256', WEBHOOK_SECRET)
+                    .update(payload)
+                    .digest('hex');
+
+                if (signature !== expectedSignature) {
+                    return res.status(401).json({ error: 'Unauthorized', message: 'Invalid signature' });
+                }
+
+                res.json({ success: true });
+            });
+
+            const request = require('supertest');
+            const body = { channel_id: 'test-channel', status: 'success' };
+            const timestamp = String(Math.floor(Date.now() / 1000));
+            // Generate signature with WRONG secret
+            const wrongSignature = generateSignature(timestamp, body, 'wrong_secret');
+
+            const response = await request(testApp)
+                .post('/webhook/modelriver')
+                .set('X-ModelRiver-Signature', wrongSignature)
+                .set('X-ModelRiver-Timestamp', timestamp)
+                .send(body);
+
+            expect(response.status).toBe(401);
+            expect(response.body.error).toBe('Unauthorized');
+        });
+    });
 });

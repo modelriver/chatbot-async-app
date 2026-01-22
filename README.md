@@ -8,6 +8,7 @@ A full-stack chatbot application using React (frontend) and Node.js/Express (bac
 - 🚀 Async AI processing via ModelRiver
 - 🔌 WebSocket-based response delivery using `@modelriver/client` SDK
 - 📥 Webhook endpoint for ModelRiver callbacks
+- 🔐 Webhook signature verification (HMAC-SHA256)
 - 📋 Structured output support for workflows with custom schemas
 - 🆔 Custom ID generation for conversations and messages
 - 🔄 Event-based callbacks with ID injection
@@ -357,6 +358,7 @@ Create `backend/.env` file with the following variables:
 | `MODELRIVER_API_KEY` | Your ModelRiver API key | Required |
 | `MODELRIVER_API_URL` | ModelRiver API URL | `https://api.modelriver.com` |
 | `BACKEND_PUBLIC_URL` | Public URL for webhook callbacks | `http://localhost:4000` |
+| `WEBHOOK_SECRET` | Secret for webhook signature verification | Optional (see below) |
 
 ### Frontend
 
@@ -388,6 +390,40 @@ Create `frontend/.env` file with the following variables (all optional):
 │   └── package.json     # Includes @modelriver/client dependency
 └── README.md
 ```
+
+## Webhook Signature Verification
+
+The backend verifies webhook authenticity using HMAC-SHA256 signature verification to ensure webhooks are from ModelRiver and haven't been tampered with.
+
+### How It Works
+
+1. **ModelRiver** sends webhooks with two security headers:
+   - `X-ModelRiver-Signature`: HMAC-SHA256 signature (lowercase hex)
+   - `X-ModelRiver-Timestamp`: Unix timestamp when the webhook was sent
+
+2. **Backend** verifies the signature by:
+   - Constructing payload: `${timestamp}.${raw_body}`
+   - Computing expected signature: `HMAC-SHA256(webhook_secret, payload)`
+   - Comparing signatures using constant-time comparison (prevents timing attacks)
+
+### Configuration
+
+1. Create a webhook in ModelRiver Console and copy the webhook secret (shown once)
+2. Add the secret to your `.env` file:
+   ```
+   WEBHOOK_SECRET=your_webhook_secret_here
+   ```
+
+### Behavior
+
+| Scenario | Response |
+|----------|----------|
+| Valid signature | 200 OK - webhook processed |
+| Invalid signature | 401 Unauthorized |
+| Missing signature header | 401 Unauthorized |
+| Missing timestamp header | 401 Unauthorized |
+| `WEBHOOK_SECRET` not set (development) | Warning logged, request allowed |
+| `WEBHOOK_SECRET` not set (production) | 500 error |
 
 ## Webhook Flow (Detailed)
 
