@@ -15,7 +15,7 @@ const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
 const crypto = require('crypto');
-const { v4: uuidv4 } = require('uuid');
+const { v4: uuidv4, validate: validateUuid } = require('uuid');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -71,7 +71,8 @@ app.use((req, res, next) => {
  * Request Body:
  * {
  *   "message": "User's message",
- *   "conversationId": "optional-existing-conversation-id"
+ *   "conversationId": "optional-client-conversation-id",
+ *   "session_id": "optional-modelriver-session-id"
  * }
  * 
  * Response:
@@ -84,10 +85,17 @@ app.use((req, res, next) => {
  */
 app.post('/chat', async (req, res) => {
     try {
-        const { message, conversationId, workflow, events } = req.body;
+        const { message, conversationId, workflow, events, session_id: sessionId } = req.body;
 
         if (!message) {
             return res.status(400).json({ error: 'Message is required' });
+        }
+
+        if (sessionId !== undefined && sessionId !== null &&
+            (typeof sessionId !== 'string' || !validateUuid(sessionId))) {
+            return res.status(400).json({
+                error: 'session_id must be a valid UUID returned by ModelRiver'
+            });
         }
 
         if (!MODELRIVER_API_KEY) {
@@ -123,6 +131,12 @@ app.post('/chat', async (req, res) => {
             }
         };
 
+        // The first turn omits session_id so ModelRiver creates a session. The
+        // client sends the returned ID on every later turn to continue it.
+        if (sessionId) {
+            payload.session_id = sessionId;
+        }
+
         console.log('🚀 Sending to ModelRiver:', MODELRIVER_API_URL);
         console.log('📦 Payload:', JSON.stringify(payload, null, 2));
 
@@ -138,7 +152,26 @@ app.post('/chat', async (req, res) => {
             }
         );
 
-        const { channel_id, ws_token, websocket_url, websocket_channel, project_id } = response.data;
+        const {
+            channel_id,
+            ws_token,
+            websocket_url,
+            websocket_channel,
+            project_id,
+            session_id
+        } = response.data;
+
+        if (session_id && !validateUuid(session_id)) {
+            return res.status(502).json({ error: 'ModelRiver returned an invalid session_id' });
+        }
+
+        if (sessionId && session_id && sessionId !== session_id) {
+            return res.status(502).json({
+                error: 'ModelRiver returned a different session_id for this conversation'
+            });
+        }
+
+        const resolvedSessionId = session_id || sessionId || null;
 
         console.log('✅ ModelRiver response:', {
             channel_id,
@@ -151,7 +184,8 @@ app.post('/chat', async (req, res) => {
             prompt: message,
             timestamp: Date.now(),
             conversationId: customConversationId,
-            messageId: customMessageId
+            messageId: customMessageId,
+            sessionId: resolvedSessionId
         });
 
         // Return WebSocket connection details to frontend
@@ -160,13 +194,17 @@ app.post('/chat', async (req, res) => {
             ws_token,
             websocket_url,
             websocket_channel,
-            project_id
+            project_id,
+            session_id: resolvedSessionId
         });
 
     } catch (error) {
         console.error('❌ Error in /chat:', error.response?.status, error.response?.data || error.message);
         console.error('❌ Full Error Details:', JSON.stringify(error.response?.data, null, 2));
-        res.status(500).json({
+        const upstreamStatus = error.response?.status;
+        const responseStatus = upstreamStatus >= 400 && upstreamStatus < 500 ? upstreamStatus : 500;
+
+        res.status(responseStatus).json({
             error: error.response?.data?.message || error.message,
             details: error.response?.data
         });
@@ -502,7 +540,11 @@ async function processModelRiverWebhook(req, res) {
                             ...callbackData,
                             id: messageId
                         },
-                        task_id: messageId
+                        task_id: messageId,
+                        // Preserve provider/model/usage information through
+                        // the callback so the browser can render accurate
+                        // request metadata with the final response.
+                        metadata: actualAiResponse?.meta || meta || {}
                     };
 
                     console.log('📦 Callback payload structure:', {
@@ -707,20 +749,24 @@ app.get('/health', (req, res) => {
 // Start Server
 // ============================================
 
-app.listen(PORT, () => {
-    console.log('\n🚀 Chatbot Async Backend');
-    console.log('========================');
-    console.log(`📡 Server running on http://localhost:${PORT}`);
-    console.log(`💬 Chat endpoint: POST http://localhost:${PORT}/chat`);
-    console.log(`📥 Webhook endpoint: POST http://localhost:${PORT}/webhook/modelriver`);
-    console.log(`❤️  Health check: GET http://localhost:${PORT}/health`);
-    console.log('');
+if (require.main === module) {
+    app.listen(PORT, () => {
+        console.log('\n🚀 Chatbot Async Backend');
+        console.log('========================');
+        console.log(`📡 Server running on http://localhost:${PORT}`);
+        console.log(`💬 Chat endpoint: POST http://localhost:${PORT}/chat`);
+        console.log(`📥 Webhook endpoint: POST http://localhost:${PORT}/webhook/modelriver`);
+        console.log(`❤️  Health check: GET http://localhost:${PORT}/health`);
+        console.log('');
 
-    if (MODELRIVER_API_KEY) {
-        console.log('✅ MODELRIVER_API_KEY is configured');
-    } else {
-        console.log('⚠️  MODELRIVER_API_KEY not set - set it in environment variables');
-    }
+        if (MODELRIVER_API_KEY) {
+            console.log('✅ MODELRIVER_API_KEY is configured');
+        } else {
+            console.log('⚠️  MODELRIVER_API_KEY not set - set it in environment variables');
+        }
 
-    console.log('\nWaiting for requests...\n');
-});
+        console.log('\nWaiting for requests...\n');
+    });
+}
+
+module.exports = { app, pendingRequests };

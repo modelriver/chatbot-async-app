@@ -20,15 +20,43 @@ import {
     Check
 } from 'lucide-react';
 
+const CONFIDENCE_LEVELS = {
+    high: { score: 0.9, label: 'High confidence' },
+    medium: { score: 0.65, label: 'Medium confidence' },
+    moderate: { score: 0.65, label: 'Moderate confidence' },
+    low: { score: 0.35, label: 'Low confidence' }
+};
+
+function normalizeConfidence(value) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+        const score = Math.min(1, Math.max(0, value > 1 ? value / 100 : value));
+        return { score, label: `${Math.round(score * 100)}% confidence` };
+    }
+
+    if (typeof value !== 'string') return null;
+
+    const normalized = value.trim().toLowerCase();
+    if (CONFIDENCE_LEVELS[normalized]) return CONFIDENCE_LEVELS[normalized];
+
+    const numericValue = Number(normalized.replace('%', ''));
+    if (!Number.isFinite(numericValue)) return { score: null, label: value };
+
+    const score = Math.min(1, Math.max(0, numericValue > 1 ? numericValue / 100 : numericValue));
+    return { score, label: `${Math.round(score * 100)}% confidence` };
+}
+
 const StructuredResponse = ({ data }) => {
-    // Parse data if it's a string
-    const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
+    let parsedData = data;
+    if (typeof data === 'string') {
+        try {
+            parsedData = JSON.parse(data);
+        } catch {
+            return <div className="response-reply"><p>{data}</p></div>;
+        }
+    }
 
     // Extract the actual data object (it might be nested in response.data)
-    const responseData = parsedData.data || parsedData;
-
-    // Debug logging
-    console.log('🔍 StructuredResponse data:', { parsedData, responseData });
+    const responseData = parsedData?.data || parsedData || {};
 
     const {
         summary,
@@ -39,6 +67,7 @@ const StructuredResponse = ({ data }) => {
         message, // The actual message content from the AI
         reply // The AI's reply/answer to the user's question
     } = responseData;
+    const confidenceDisplay = normalizeConfidence(confidence);
 
     // Sentiment icon mapping
     const getSentimentIcon = (sentiment) => {
@@ -52,16 +81,10 @@ const StructuredResponse = ({ data }) => {
     };
 
     // Confidence color mapping
-    const getConfidenceColor = (confidence) => {
-        if (confidence >= 0.8) return '#10b981'; // Emerald 500
-        if (confidence >= 0.6) return '#f59e0b'; // Amber 500
+    const getConfidenceColor = (score) => {
+        if (score >= 0.8) return '#10b981'; // Emerald 500
+        if (score >= 0.6) return '#f59e0b'; // Amber 500
         return '#ef4444'; // Red 500
-    };
-
-    // Priority icon mapping
-    const getPriorityIcon = (priority) => {
-        // Just use a dot with color for now, managed via CSS classes
-        return <div className={`priority-dot priority-${priority?.toLowerCase()}`} />;
     };
 
     return (
@@ -72,20 +95,22 @@ const StructuredResponse = ({ data }) => {
                     {getSentimentIcon(sentiment)}
                     <span className="sentiment-label">{sentiment || 'neutral'}</span>
                 </div>
-                {confidence !== undefined && (
+                {confidenceDisplay && (
                     <div className="confidence-indicator">
-                        <div className="confidence-bar-container">
-                            <div
-                                className="confidence-bar"
-                                style={{
-                                    width: `${confidence * 100}%`,
-                                    backgroundColor: getConfidenceColor(confidence)
-                                }}
-                            />
-                        </div>
+                        {confidenceDisplay.score !== null && (
+                            <div className="confidence-bar-container" aria-hidden="true">
+                                <div
+                                    className="confidence-bar"
+                                    style={{
+                                        width: `${confidenceDisplay.score * 100}%`,
+                                        backgroundColor: getConfidenceColor(confidenceDisplay.score)
+                                    }}
+                                />
+                            </div>
+                        )}
                         <span className="confidence-label">
                             <TrendingUp size={14} />
-                            {(confidence * 100).toFixed(0)}%
+                            {confidenceDisplay.label}
                         </span>
                     </div>
                 )}

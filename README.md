@@ -236,6 +236,7 @@ curl -X POST http://localhost:4000/chat \
     "message": "Hello",
     "workflow": "custom-workflow-name",
     "conversationId": "optional-existing-conversation-id",
+    "session_id": "modelriver-session-id-from-the-first-response",
     "events": ["webhook_received"]
   }'
 ```
@@ -244,9 +245,24 @@ curl -X POST http://localhost:4000/chat \
 - `message` (required): The user's message
 - `workflow` (optional): Workflow name (default: `mr_chatbot_workflow`)
 - `conversationId` (optional): Existing conversation ID (generates new one if not provided)
+- `session_id` (optional): ModelRiver session UUID returned by the first request. Send it on every follow-up turn to continue the same memory.
 - `events` (optional): Array of events to enable callback functionality (default: `["webhook_received"]`)
 
 **Note:** Structured output is configured in the workflow settings in ModelRiver Console, not sent as a parameter in the request. If your workflow has structured output configured, the response will automatically be in structured format.
+
+### Session Memory
+
+To use conversation memory, enable sessions on the selected ModelRiver workflow and keep request-body logging enabled for its project. The first `/chat` request should omit `session_id`; its response includes the newly created ID:
+
+```json
+{
+  "channel_id": "...",
+  "session_id": "ccf65782-969c-45bb-812d-10a1f218c30f",
+  "ws_token": "..."
+}
+```
+
+Pass that exact `session_id` on the next `/chat` request. The React client does this automatically until **New conversation** is selected, which clears the old ID and causes ModelRiver to create a new session. The client-generated `conversationId` is metadata only and must not be substituted for the ModelRiver session ID.
 
 ### Structured Output
 

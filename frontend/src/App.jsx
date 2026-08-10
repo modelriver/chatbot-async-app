@@ -4,35 +4,67 @@
  * This component provides a chat interface that:
  * 1. Sends messages to the backend (/chat endpoint)
  * 2. Receives WebSocket connection details
- * 3. Connects to ModelRiver WebSocket to receive AI responses using @modelriver/client
+ * 3. Connects to the ModelRiver Phoenix channel for the final AI response
  * 
  * Data Flow:
  * User Message → Backend → ModelRiver → WebSocket → This Component
  */
 
-import { useState, useRef, useEffect } from 'react'
-import { useModelRiver } from '@modelriver/client/react'
+import { useState, useRef, useEffect, useCallback } from 'react'
+import { Socket } from 'phoenix'
 import './App.css'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
+import { PrismLight as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
+import javascript from 'react-syntax-highlighter/dist/esm/languages/prism/javascript'
+import typescript from 'react-syntax-highlighter/dist/esm/languages/prism/typescript'
+import jsx from 'react-syntax-highlighter/dist/esm/languages/prism/jsx'
+import tsx from 'react-syntax-highlighter/dist/esm/languages/prism/tsx'
+import json from 'react-syntax-highlighter/dist/esm/languages/prism/json'
+import bash from 'react-syntax-highlighter/dist/esm/languages/prism/bash'
+import python from 'react-syntax-highlighter/dist/esm/languages/prism/python'
+import markup from 'react-syntax-highlighter/dist/esm/languages/prism/markup'
+import css from 'react-syntax-highlighter/dist/esm/languages/prism/css'
 import StructuredResponse from './StructuredResponse'
 import {
     Send,
     Bot,
     User,
-    Settings,
     AlertCircle,
     Loader2,
     Clock,
     Database,
-    Hash
+    Hash,
+    MessageSquarePlus
 } from 'lucide-react'
+
+SyntaxHighlighter.registerLanguage('javascript', javascript)
+SyntaxHighlighter.registerLanguage('js', javascript)
+SyntaxHighlighter.registerLanguage('typescript', typescript)
+SyntaxHighlighter.registerLanguage('ts', typescript)
+SyntaxHighlighter.registerLanguage('jsx', jsx)
+SyntaxHighlighter.registerLanguage('tsx', tsx)
+SyntaxHighlighter.registerLanguage('json', json)
+SyntaxHighlighter.registerLanguage('bash', bash)
+SyntaxHighlighter.registerLanguage('shell', bash)
+SyntaxHighlighter.registerLanguage('python', python)
+SyntaxHighlighter.registerLanguage('html', markup)
+SyntaxHighlighter.registerLanguage('css', css)
 
 
 // Backend API URL
 const BACKEND_URL = import.meta.env.VITE_API_URL || 'http://localhost:4000'
+
+// ModelRiver's local Phoenix endpoint listens on IPv4 by default. Browsers on
+// macOS may resolve `localhost` to IPv6 first, which prevents the WebSocket
+// from connecting even though the HTTP request succeeded. Keep external URLs
+// unchanged and only normalize local socket URLs.
+function resolveWebSocketUrl(url) {
+    if (typeof url !== 'string') return url
+
+    return url.replace(/^ws:\/\/localhost(?=[:/]|$)/, 'ws://127.0.0.1')
+}
 
 function App() {
     // ============================================
@@ -44,31 +76,103 @@ function App() {
     const [isLoading, setIsLoading] = useState(false)
     const [error, setError] = useState(null)
     const [devMode, setDevMode] = useState(false)
+    const [sessionId, setSessionId] = useState(null)
+    const [response, setResponse] = useState(null)
+    const [modelRiverError, setModelRiverError] = useState(null)
+    const [connectionState, setConnectionState] = useState('disconnected')
+    const [steps, setSteps] = useState([])
 
     // Refs
     const messagesEndRef = useRef(null)
     const isConnectingRef = useRef(false) // Guard to prevent multiple simultaneous connection attempts
     const processedChannelsRef = useRef(new Set()) // Track processed channel IDs to prevent duplicate messages
+    const socketRef = useRef(null)
 
     // ============================================
-    // ModelRiver Client Hook
+    // ModelRiver WebSocket client
     // ============================================
 
-    const {
-        connect,
-        disconnect,
-        reset,
-        response,
-        error: modelRiverError,
-        isConnected,
-        isConnecting,
-        steps,
-        connectionState
-    } = useModelRiver({
-        baseUrl: 'wss://api.modelriver.com/socket',
-        persist: true,
-        debug: false
-    })
+    const isConnected = connectionState === 'connected'
+    const isConnecting = connectionState === 'connecting'
+
+    const disconnect = useCallback(() => {
+        const connection = socketRef.current
+        socketRef.current = null
+
+        if (connection) {
+            connection.channel.leave()
+            connection.socket.disconnect()
+        }
+
+        setConnectionState('disconnected')
+    }, [])
+
+    const reset = useCallback(() => {
+        disconnect()
+        setResponse(null)
+        setModelRiverError(null)
+        setSteps([])
+    }, [disconnect])
+
+    const connect = useCallback(({ wsToken, websocketUrl, websocketChannel }) => {
+        disconnect()
+        setResponse(null)
+        setModelRiverError(null)
+        setConnectionState('connecting')
+        setSteps([
+            { id: 'queue', name: 'Connecting to ModelRiver', status: 'pending' },
+            { id: 'process', name: 'Processing AI request', status: 'pending' },
+            { id: 'backend', name: 'Waiting for backend callback', status: 'pending' }
+        ])
+
+        const socket = new Socket(websocketUrl, {
+            params: { token: wsToken },
+            // A WebSocket token is single-use. Never reconnect with it.
+            reconnectAfterMs: () => 60_000
+        })
+        const channel = socket.channel(websocketChannel)
+        socketRef.current = { socket, channel }
+
+        socket.onOpen(() => {
+            setConnectionState('connected')
+            channel.join()
+                .receive('ok', () => {
+                    setSteps(previous => previous.map(step =>
+                        step.id === 'queue' ? { ...step, status: 'success' } : step
+                    ))
+                })
+                .receive('error', () => {
+                    setModelRiverError('Failed to join the ModelRiver response channel')
+                    disconnect()
+                })
+        })
+
+        socket.onError(() => {
+            if (socketRef.current?.socket === socket) {
+                setModelRiverError('WebSocket connection error')
+                disconnect()
+            }
+        })
+
+        channel.on('response', (payload) => {
+            const status = payload.meta?.status || payload.status
+
+            setResponse(payload)
+            if (status === 'ai_generated') {
+                setSteps(previous => previous.map(step =>
+                    step.id === 'process' ? { ...step, status: 'success' } : step
+                ))
+            }
+
+            if (status === 'completed' || status === 'success') {
+                // Close deliberately after receiving the final payload so the
+                // Phoenix client cannot retry with the consumed one-time token.
+                disconnect()
+            }
+        })
+
+        socket.connect()
+    }, [disconnect])
 
     // ============================================
     // Auto-scroll to bottom when new messages arrive
@@ -82,7 +186,11 @@ function App() {
     useEffect(() => {
         if (response) {
             // Extract metadata and status
-            const meta = response.meta || {};
+            const meta = {
+                ...(response.callback_metadata || {}),
+                ...(response.metadata || {}),
+                ...(response.meta || {})
+            };
             const status = meta.status || response.status || 'pending';
             const isStructured = meta.structured_output === true;
 
@@ -192,7 +300,7 @@ function App() {
 
                 // Extract usage and model info
                 const usage = meta.usage || {};
-                const model = meta.used_model || meta.model || 'unknown';
+                const model = meta.used_model || meta.model || null;
 
                 // Add assistant message to chat only when status is success
                 setMessages(prev => [...prev, {
@@ -309,7 +417,8 @@ function App() {
                     'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({
-                    message: userMessage
+                    message: userMessage,
+                    ...(sessionId ? { session_id: sessionId } : {})
                 })
             })
 
@@ -321,8 +430,17 @@ function App() {
             const data = await backendResponse.json()
             console.log('✅ Backend response:', data)
 
-            // Step 2: Connect to ModelRiver WebSocket using the client SDK
+            if (sessionId && data.session_id && data.session_id !== sessionId) {
+                throw new Error('ModelRiver returned a different session_id for this conversation')
+            }
+
+            if (data.session_id) {
+                setSessionId(data.session_id)
+            }
+
+            // Step 2: Connect to the request's ModelRiver response channel
             const { channel_id, ws_token, websocket_url, websocket_channel } = data
+            const resolvedWebSocketUrl = resolveWebSocketUrl(websocket_url)
 
             if (!channel_id || !ws_token || !websocket_url || !websocket_channel) {
                 throw new Error('Missing WebSocket connection details from backend')
@@ -350,12 +468,12 @@ function App() {
             // Set connection guard
             isConnectingRef.current = true;
 
-            // Connect using ModelRiver client
+            // Connect to the one-time response channel
             console.log('🔌 Connecting to new channel:', channel_id);
             connect({
                 channelId: channel_id,
                 wsToken: ws_token,
-                websocketUrl: websocket_url,
+                websocketUrl: resolvedWebSocketUrl,
                 websocketChannel: websocket_channel
             });
 
@@ -382,6 +500,19 @@ function App() {
         }
     }
 
+    const startNewConversation = () => {
+        if (isLoading || isConnecting) return
+
+        disconnect()
+        reset()
+        setMessages([])
+        setInputValue('')
+        setError(null)
+        setSessionId(null)
+        processedChannelsRef.current.clear()
+        isConnectingRef.current = false
+    }
+
     // ============================================
     // Render
     // ============================================
@@ -391,18 +522,39 @@ function App() {
             {/* Header */}
             <header className="chat-header">
                 <div className="header-left">
-                    <Bot size={22} color="var(--accent-primary)" strokeWidth={2.5} />
-                    <h1>ModelRiver Chatbot</h1>
+                    <div className="brand-mark">
+                        <Bot size={21} strokeWidth={2.3} />
+                    </div>
+                    <div className="brand-copy">
+                        <h1>ModelRiver Assistant</h1>
+                        <span>Session-aware AI chat</span>
+                    </div>
                     <div className={`connection-status ${connectionState}`}>
                         <span className="status-dot"></span>
                         <span className="status-text">
                             {isConnecting ? 'Connecting...' :
                                 isConnected ? 'Connected' :
-                                    connectionState === 'error' ? 'Error' : 'Disconnected'}
+                                    connectionState === 'error' ? 'Needs attention' : 'Ready'}
                         </span>
                     </div>
                 </div>
                 <div className="header-right">
+                    {sessionId && (
+                        <div className="session-badge session-active" title={devMode ? sessionId : 'Conversation memory is active'}>
+                            <Database size={13} />
+                            {devMode ? `Session ${sessionId.slice(0, 8)}…` : 'Memory active'}
+                        </div>
+                    )}
+                    <button
+                        type="button"
+                        className="new-conversation-button"
+                        onClick={startNewConversation}
+                        disabled={isLoading || isConnecting || messages.length === 0}
+                        title="Start a new conversation and session"
+                    >
+                        <MessageSquarePlus size={15} />
+                        New conversation
+                    </button>
                     <div className="dev-mode-control">
                         <span className="dev-mode-label">Dev Mode</span>
                         <label className="switch">
@@ -483,9 +635,11 @@ function App() {
                                             <div className="metadata-badge">
                                                 <Hash size={12} /> {(message.meta?.channelId || message.meta?.channel_id || "").slice(0, 8)}...
                                             </div>
-                                            <div className="metadata-badge">
-                                                <Bot size={12} /> {message.meta?.model}
-                                            </div>
+                                            {message.meta?.model && (
+                                                <div className="metadata-badge">
+                                                    <Bot size={12} /> {message.meta.model}
+                                                </div>
+                                            )}
                                             {message.meta?.duration_ms && (
                                                 <div className="metadata-badge">
                                                     <Clock size={12} /> {message.meta.duration_ms}ms
@@ -583,6 +737,13 @@ function App() {
                     >
                         {isLoading ? <Loader2 size={20} className="animate-spin" /> : <Send size={20} />}
                     </button>
+                </div>
+                <div className="input-footer">
+                    <span>Enter to send · Shift + Enter for a new line</span>
+                    <span className={sessionId ? 'memory-state active' : 'memory-state'}>
+                        <span className="memory-dot" />
+                        {sessionId ? 'Conversation memory on' : 'A session starts with your first message'}
+                    </span>
                 </div>
             </div>
         </div>

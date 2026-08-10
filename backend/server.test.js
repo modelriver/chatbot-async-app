@@ -7,17 +7,14 @@
 // Mock axios before requiring server
 jest.mock('axios');
 const axios = require('axios');
+const request = require('supertest');
 
 // Mock environment
 process.env.MODELRIVER_API_KEY = 'mr_test_mock_api_key_12345';
 
-// We need to extract the Express app for testing
-// First, let's create a testable version by modifying how we export
+const { app, pendingRequests } = require('./server');
 
 describe('Chatbot Async Backend', () => {
-    let app;
-    let server;
-
     beforeAll(() => {
         // Suppress console logs during tests
         jest.spyOn(console, 'log').mockImplementation(() => { });
@@ -30,26 +27,12 @@ describe('Chatbot Async Backend', () => {
 
     beforeEach(() => {
         jest.clearAllMocks();
+        pendingRequests.clear();
     });
 
     describe('Health Check', () => {
         it('should return health status', async () => {
-            // Import express and create minimal test app
-            const express = require('express');
-            const testApp = express();
-
-            testApp.get('/health', (req, res) => {
-                res.json({
-                    status: 'ok',
-                    timestamp: new Date().toISOString(),
-                    config: {
-                        api_key_configured: true
-                    }
-                });
-            });
-
-            const request = require('supertest');
-            const response = await request(testApp).get('/health');
+            const response = await request(app).get('/health');
 
             expect(response.status).toBe(200);
             expect(response.body.status).toBe('ok');
@@ -59,20 +42,7 @@ describe('Chatbot Async Backend', () => {
 
     describe('POST /chat', () => {
         it('should return 400 if message is missing', async () => {
-            const express = require('express');
-            const testApp = express();
-            testApp.use(express.json());
-
-            testApp.post('/chat', (req, res) => {
-                const { message } = req.body;
-                if (!message) {
-                    return res.status(400).json({ error: 'Message is required' });
-                }
-                res.json({ success: true });
-            });
-
-            const request = require('supertest');
-            const response = await request(testApp)
+            const response = await request(app)
                 .post('/chat')
                 .send({});
 
@@ -80,43 +50,21 @@ describe('Chatbot Async Backend', () => {
             expect(response.body.error).toBe('Message is required');
         });
 
-        it('should forward message to ModelRiver and return WebSocket details', async () => {
-            // Mock ModelRiver API response
+        it('creates a session on the first turn and returns it to the client', async () => {
+            const generatedSessionId = 'ccf65782-969c-45bb-812d-10a1f218c30f';
+
             axios.post.mockResolvedValueOnce({
                 data: {
                     channel_id: 'mock-channel-123',
                     ws_token: 'mock-ws-token',
                     websocket_url: 'wss://api.modelriver.com/socket',
                     websocket_channel: 'ai_response:project:channel',
-                    project_id: 'mock-project'
+                    project_id: 'mock-project',
+                    session_id: generatedSessionId
                 }
             });
 
-            const express = require('express');
-            const testApp = express();
-            testApp.use(express.json());
-
-            testApp.post('/chat', async (req, res) => {
-                const { message } = req.body;
-                if (!message) {
-                    return res.status(400).json({ error: 'Message is required' });
-                }
-
-                try {
-                    const response = await axios.post(
-                        'https://api.modelriver.com/v1/ai/async',
-                        { messages: [{ role: 'user', content: message }] },
-                        { headers: { 'Authorization': 'Bearer mock-key' } }
-                    );
-
-                    res.json(response.data);
-                } catch (error) {
-                    res.status(500).json({ error: error.message });
-                }
-            });
-
-            const request = require('supertest');
-            const response = await request(testApp)
+            const response = await request(app)
                 .post('/chat')
                 .send({ message: 'Hello test' });
 
@@ -124,6 +72,95 @@ describe('Chatbot Async Backend', () => {
             expect(response.body.channel_id).toBe('mock-channel-123');
             expect(response.body.ws_token).toBe('mock-ws-token');
             expect(response.body.websocket_url).toBe('wss://api.modelriver.com/socket');
+            expect(response.body.session_id).toBe(generatedSessionId);
+
+            const [, modelRiverPayload] = axios.post.mock.calls[0];
+            expect(modelRiverPayload).not.toHaveProperty('session_id');
+            expect(pendingRequests.get('mock-channel-123').sessionId).toBe(generatedSessionId);
+        });
+
+        it('forwards the existing session_id on follow-up turns', async () => {
+            const sessionId = '5aab1b34-a7db-4693-ab5e-fe0725e735a4';
+
+            axios.post.mockResolvedValueOnce({
+                data: {
+                    channel_id: 'follow-up-channel',
+                    ws_token: 'follow-up-token',
+                    websocket_url: 'wss://api.modelriver.com/socket',
+                    websocket_channel: 'ai_response:project:follow-up-channel',
+                    project_id: 'mock-project',
+                    session_id: sessionId
+                }
+            });
+
+            const response = await request(app)
+                .post('/chat')
+                .send({ message: 'What did I say?', session_id: sessionId });
+
+            expect(response.status).toBe(200);
+            expect(response.body.session_id).toBe(sessionId);
+
+            const [, modelRiverPayload] = axios.post.mock.calls[0];
+            expect(modelRiverPayload.session_id).toBe(sessionId);
+            expect(modelRiverPayload.messages).toEqual([
+                { role: 'user', content: 'What did I say?' }
+            ]);
+        });
+
+        it('rejects malformed session IDs before calling ModelRiver', async () => {
+            const response = await request(app)
+                .post('/chat')
+                .send({ message: 'Hello', session_id: 'not-a-session-id' });
+
+            expect(response.status).toBe(400);
+            expect(response.body.error).toMatch(/valid UUID/);
+            expect(axios.post).not.toHaveBeenCalled();
+        });
+
+        it('preserves ModelRiver session validation errors', async () => {
+            const sessionId = '101c6d68-c97b-4b05-99e4-f37e94f75e0b';
+
+            axios.post.mockRejectedValueOnce({
+                response: {
+                    status: 422,
+                    data: {
+                        message: 'Session not found',
+                        error: 'session_not_found'
+                    }
+                },
+                message: 'Request failed with status code 422'
+            });
+
+            const response = await request(app)
+                .post('/chat')
+                .send({ message: 'Continue', session_id: sessionId });
+
+            expect(response.status).toBe(422);
+            expect(response.body.error).toBe('Session not found');
+            expect(response.body.details.error).toBe('session_not_found');
+        });
+
+        it('rejects a mismatched session ID returned for a follow-up turn', async () => {
+            const requestedSessionId = '33822e90-1b51-4641-aee5-769004ce52b7';
+
+            axios.post.mockResolvedValueOnce({
+                data: {
+                    channel_id: 'mismatch-channel',
+                    ws_token: 'mismatch-token',
+                    websocket_url: 'wss://api.modelriver.com/socket',
+                    websocket_channel: 'ai_response:project:mismatch-channel',
+                    project_id: 'mock-project',
+                    session_id: '5065ddee-3a57-4d47-aae8-34d564f52e38'
+                }
+            });
+
+            const response = await request(app)
+                .post('/chat')
+                .send({ message: 'Continue', session_id: requestedSessionId });
+
+            expect(response.status).toBe(502);
+            expect(response.body.error).toMatch(/different session_id/);
+            expect(pendingRequests.has('mismatch-channel')).toBe(false);
         });
     });
 

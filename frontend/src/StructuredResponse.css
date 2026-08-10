@@ -1,13 +1,8 @@
 /* StructuredResponse Component Styles */
 
 .structured-response {
-    background: var(--bg-primary);
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
-    padding: 16px;
+    min-width: min(520px, 62vw);
     color: var(--text-primary);
-    box-shadow: var(--shadow-sm);
-    margin-top: 8px;
 }
 
 /* Header Section */
@@ -15,7 +10,7 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 16px;
+    margin-bottom: 18px;
     padding-bottom: 12px;
     border-bottom: 1px solid var(--border-color);
 }
@@ -26,11 +21,19 @@
     gap: 8px;
 }
 
+.sentiment-indicator svg {
+    width: 18px;
+    height: 18px;
+}
+
 .sentiment-label {
     font-weight: 600;
     text-transform: capitalize;
-    font-size: 0.9rem;
+    font-size: 0.78rem;
     color: var(--text-primary);
+    padding: 4px 8px;
+    border-radius: 999px;
+    background: var(--bg-tertiary);
 }
 
 .confidence-indicator {
@@ -55,7 +58,7 @@
 
 .confidence-label {
     font-size: 0.8rem;
-    font-weight: 500;
+    font-weight: 600;
     color: var(--text-muted);
     display: flex;
     align-items: center;
@@ -65,13 +68,12 @@
 /* Reply Section - Main AI Response */
 .response-reply {
     margin-bottom: 20px;
-    padding: 14px;
-    background: var(--bg-tertiary);
-    border: 1px solid var(--border-color);
-    border-radius: 6px;
+    padding: 0;
+    background: transparent;
+    border: 0;
     color: var(--text-primary);
-    font-size: 0.95rem;
-    line-height: 1.5;
+    font-size: 1rem;
+    line-height: 1.65;
 }
 
 /* Section Common Styles */
@@ -82,7 +84,7 @@
     margin-bottom: 16px;
 }
 
-h4 {
+.structured-response h4 {
     margin: 0 0 10px 0;
     font-size: 0.75rem;
     font-weight: 700;
@@ -94,7 +96,7 @@ h4 {
     gap: 6px;
 }
 
-p {
+.structured-response p {
     margin: 0;
     line-height: 1.5;
     font-size: 0.9rem;
@@ -109,13 +111,13 @@ p {
 }
 
 .topic-tag {
-    background: var(--bg-tertiary);
-    color: var(--text-secondary);
+    background: #f1f3ff;
+    color: #4f46c8;
     padding: 4px 10px;
-    border-radius: 4px;
+    border-radius: 999px;
     font-size: 0.8rem;
     font-weight: 500;
-    border: 1px solid var(--border-color);
+    border: 1px solid #dfe2ff;
 }
 
 /* Action Items Section */
@@ -187,4 +189,10 @@ p {
 .priority-badge.low {
     background: #d1fae5;
     color: #10b981;
+}
+
+@media (max-width: 760px) {
+    .structured-response { min-width: 0; }
+    .response-header { align-items: flex-start; gap: 10px; }
+    .confidence-bar-container { display: none; }
 }
